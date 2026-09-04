@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Run the complete local instance sequence."""
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from window_ops import ScriptError, target_windows  # noqa: E402
+
+
+BIN_DIR = Path(__file__).resolve().parent
+
+
+def run_stage(label: str, command: list[str]) -> None:
+    print(f"\n== {label} ==", flush=True)
+    result = subprocess.run(command)
+    if result.returncode != 0:
+        raise ScriptError(f"etapa falhou ({result.returncode}): {label}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Executar a sequência completa nos alvos configurados."
+    )
+    parser.add_argument(
+        "--main-menu-wait",
+        type=float,
+        default=float(os.environ.get("SETUP_INSTANCES_WAIT_MAIN_MENU", "6")),
+        help="espera após as sete janelas aparecerem (padrão: 6s)",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if not 0 <= args.main_menu_wait <= 60:
+        parser.error("--main-menu-wait deve estar no intervalo 0..60")
+
+    commands = [
+        ("abrir as sete instâncias", [str(BIN_DIR / "launch-instances")]),
+        ("selecionar servidor", [str(BIN_DIR / "join-server"), "--all"]),
+        ("executar setup", [str(BIN_DIR / "configure-instances"), "--all"]),
+        ("organizar grid final", [str(BIN_DIR / "arrange-grid")]),
+    ]
+
+    if args.dry_run:
+        print("DRY-RUN: nenhuma janela ou input será alterado")
+        for index, (label, command) in enumerate(commands):
+            print(f"{index + 1}. {label}: {' '.join(command)}")
+            if index == 0:
+                print(f"   esperar tela inicial: {args.main_menu_wait}s")
+        return 0
+
+    present = target_windows()
+    if present:
+        titles = ", ".join(sorted(str(window["title"]) for window in present))
+        raise ScriptError(
+            "execução completa exige começar sem alvos abertos; "
+            f"encontradas: {titles}"
+        )
+
+    run_stage(*commands[0])
+    print(f"\nAguardando tela inicial ({args.main_menu_wait:g}s)...", flush=True)
+    time.sleep(args.main_menu_wait)
+    for stage in commands[1:]:
+        run_stage(*stage)
+
+    print("\nOK: sete contas configuradas e grid aplicado.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ScriptError, OSError, ValueError) as exc:
+        print(f"ERRO: {exc}", file=sys.stderr)
+        raise SystemExit(1)

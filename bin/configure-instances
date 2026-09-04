@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""Apply the staged input sequence to selected instances."""
+
+import argparse
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from window_ops import (  # noqa: E402
+    KEY_E,
+    KEY_ESC,
+    KEY_K,
+    KEY_P,
+    KEY_UP,
+    ScriptError,
+    TITLES,
+    unit_key,
+    unit_left_click,
+    unit_right_click,
+    unit_window_id,
+    focused_window,
+    unit_focus,
+    temporary_pointer_warp,
+    target_action,
+)
+
+
+def pause(name: str, default: float) -> None:
+    value = float(os.environ.get(name, str(default)))
+    if value < 0 or value > 30:
+        raise ScriptError(f"{name} fora do intervalo seguro 0..30")
+    time.sleep(value)
+
+
+def sequence(title: str, dry_run: bool, from_selector: bool = False) -> None:
+    panel_offset_y = int(os.environ.get("SETUP_INSTANCES_PANEL_OFFSET_Y", "-50"))
+    up_key_ms = int(os.environ.get("SETUP_INSTANCES_UP_KEY_MS", "150"))
+    p_key_ms = int(os.environ.get("SETUP_INSTANCES_P_KEY_MS", "150"))
+    k_key_ms = int(os.environ.get("SETUP_INSTANCES_K_KEY_MS", "150"))
+    e_key_ms = int(os.environ.get("SETUP_INSTANCES_E_KEY_MS", "150"))
+    steps = [f"resume ({KEY_ESC})"]
+    if not from_selector:
+        steps.append(f"recall ({KEY_UP}, {up_key_ms}ms)")
+    steps.extend([
+        "abrir seletor",
+        f"selecionar item (offset Y={panel_offset_y}px)",
+        f"mode ({KEY_P}, {p_key_ms}ms)",
+        "final pointer" if target_action(title) == "pointer" else "final key + inspect",
+    ])
+    if dry_run:
+        print(f"DRY-RUN {title}: " + " -> ".join(steps))
+        return
+
+    # Presence is checked before the first input; every helper re-resolves the
+    # current ID and reconfirms focus again before its own input.
+    unit_window_id(title)
+    print(f"{title}: fechando menu de pausa com Esc")
+    unit_key(title, KEY_ESC)
+    pause("SETUP_INSTANCES_WAIT_ESC", 0.80)
+
+    if not from_selector:
+        print(f"{title}: recall")
+        unit_key(title, KEY_UP, key_delay_ms=up_key_ms)
+        pause("SETUP_INSTANCES_WAIT_RECALL", 5.0)
+
+    print(f"{title}: abrindo seletor")
+    # The window was already focused by the key helpers, so its pointer was
+    # warped to the center. Do not bounce through the anchor between clicks.
+    unit_right_click(title, recenter=False)
+    pause("SETUP_INSTANCES_WAIT_GUI", 0.8)
+
+    print(f"{title}: selecionando item")
+    unit_left_click(title, offset_y=panel_offset_y, recenter=False)
+    pause("SETUP_INSTANCES_WAIT_STAGE", 3.0)
+
+    print(f"{title}: enviando P")
+    unit_key(title, KEY_P, key_delay_ms=p_key_ms)
+    pause("SETUP_INSTANCES_WAIT_KEY", 3.0)
+
+    if target_action(title) == "pointer":
+        print(f"{title}: ação final de ponteiro")
+        unit_right_click(title, recenter=False)
+    else:
+        print(f"{title}: ação final de tecla")
+        unit_key(title, KEY_K, key_delay_ms=k_key_ms)
+        pause("SETUP_INSTANCES_WAIT_INSPECT", 0.5)
+        print(f"{title}: ação de inspeção")
+        unit_key(title, KEY_E, key_delay_ms=e_key_ms)
+
+
+def pipeline(
+    titles: list[str], dry_run: bool, from_selector: bool = False
+) -> dict[str, str]:
+    """Run each wait once per phase instead of once per account."""
+    panel_offset_y = int(os.environ.get("SETUP_INSTANCES_PANEL_OFFSET_Y", "-50"))
+    up_key_ms = int(os.environ.get("SETUP_INSTANCES_UP_KEY_MS", "150"))
+    p_key_ms = int(os.environ.get("SETUP_INSTANCES_P_KEY_MS", "150"))
+    k_key_ms = int(os.environ.get("SETUP_INSTANCES_K_KEY_MS", "150"))
+    e_key_ms = int(os.environ.get("SETUP_INSTANCES_E_KEY_MS", "150"))
+    wait_focus = float(os.environ.get("SETUP_INSTANCES_WAIT_FOCUS", "0.5"))
+    wait_resume = float(os.environ.get("SETUP_INSTANCES_WAIT_RESUME", "0.5"))
+    wait_between = float(os.environ.get("SETUP_INSTANCES_WAIT_BETWEEN_WINDOWS", "0.6"))
+    for name, value in (
+        ("SETUP_INSTANCES_WAIT_FOCUS", wait_focus),
+        ("SETUP_INSTANCES_WAIT_RESUME", wait_resume),
+        ("SETUP_INSTANCES_WAIT_BETWEEN_WINDOWS", wait_between),
+    ):
+        if value < 0 or value > 10:
+            raise ScriptError(f"{name} fora do intervalo seguro 0..10")
+    results: dict[str, str] = {}
+
+    if dry_run:
+        print("DRY-RUN PIPELINE: " + ", ".join(titles))
+        print(
+            f"  Trocas: foco → {wait_focus}s → Esc → {wait_resume}s → ação → {wait_between}s"
+        )
+        if from_selector:
+            print("  Início: seletor (recall ignorado)")
+        else:
+            print(f"  1. Resume + recall por {up_key_ms}ms; seguir sem espera global")
+        print(
+            f"  2. Em cada alvo: abrir seletor + item Y={panel_offset_y}px"
+        )
+        print("     Depois, seguir sem espera global")
+        print(f"  3. Mode por {p_key_ms}ms; seguir sem espera global")
+        print("  4. Ação final configurada por alvo")
+        return {title: "OK" for title in titles}
+
+    active: list[str] = []
+    for title in titles:
+        try:
+            unit_window_id(title)
+            active.append(title)
+        except (ScriptError, ValueError) as exc:
+            results[title] = f"ERRO: {exc}"
+            print(f"ERRO {title}: {exc}", file=sys.stderr)
+
+    def focus_and_resume(title: str) -> None:
+        target_id = unit_window_id(title)
+        before = focused_window()
+        already_focused = bool(before and before.get("id") == target_id)
+        unit_focus(title)
+        if not already_focused:
+            time.sleep(wait_focus)
+            unit_key(title, KEY_ESC)
+            time.sleep(wait_resume)
+
+    def phase(label: str, action, *, resume: bool = True) -> None:
+        print(f"\n== {label} ==")
+        for title in list(active):
+            try:
+                if resume:
+                    focus_and_resume(title)
+                action(title)
+                print(f"OK {title}")
+                time.sleep(wait_between)
+            except (ScriptError, ValueError) as exc:
+                results[title] = f"ERRO: {label}: {exc}"
+                active.remove(title)
+                print(f"ERRO {title}: {exc}", file=sys.stderr)
+
+    def recall_action(title: str) -> None:
+        focus_and_resume(title)
+        unit_key(title, KEY_UP, key_delay_ms=up_key_ms)
+
+    if not from_selector:
+        phase("resume + recall", recall_action, resume=False)
+
+    def open_selector(title: str) -> None:
+        # Keep both actions together: this GUI can disappear when focus leaves.
+        unit_right_click(title, recenter=False)
+        unit_left_click(title, offset_y=panel_offset_y, recenter=False)
+
+    phase("abrir seletor e escolher item", open_selector)
+
+    phase(
+        "enviar P",
+        lambda title: unit_key(title, KEY_P, key_delay_ms=p_key_ms),
+    )
+
+    def final_action(title: str) -> None:
+        if target_action(title) == "pointer":
+            unit_right_click(title, recenter=False)
+        else:
+            unit_key(title, KEY_K, key_delay_ms=k_key_ms)
+            pause("SETUP_INSTANCES_WAIT_INSPECT", 0.5)
+            unit_key(title, KEY_E, key_delay_ms=e_key_ms)
+
+    phase("ação final", final_action)
+    for title in active:
+        results[title] = "OK"
+    return results
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Os alvos devem estar prontos para a sequência de entrada configurada."
+    )
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--title", choices=TITLES, help="testar/processar uma única conta")
+    target.add_argument("--all", action="store_true", help="processar as sete em pipeline")
+    target.add_argument(
+        "--batch",
+        nargs="+",
+        choices=TITLES,
+        metavar="TÍTULO",
+        help="processar um grupo em pipeline",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--from-selector",
+        action="store_true",
+        help="pular recall e começar pelo seletor",
+    )
+    args = parser.parse_args()
+
+    with temporary_pointer_warp(enabled=not args.dry_run):
+        if args.title:
+            titles = [args.title]
+            results: dict[str, str] = {}
+            try:
+                sequence(args.title, args.dry_run, args.from_selector)
+                results[args.title] = "OK"
+            except (ScriptError, ValueError) as exc:
+                results[args.title] = f"ERRO: {exc}"
+                print(f"ERRO {args.title}: {exc}", file=sys.stderr)
+        else:
+            titles = list(dict.fromkeys(list(TITLES) if args.all else args.batch))
+            results = pipeline(titles, args.dry_run, args.from_selector)
+
+    print("\nResumo:")
+    for title in titles:
+        print(f"{results[title]:<6} {title}" if results[title] == "OK" else f"{title}: {results[title]}")
+    return 0 if all(result == "OK" for result in results.values()) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

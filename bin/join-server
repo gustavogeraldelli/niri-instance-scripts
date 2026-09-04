@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Select the saved server from each configured instance."""
+
+import argparse
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from window_ops import (  # noqa: E402
+    ScriptError,
+    TITLES,
+    unit_double_click,
+    unit_left_click,
+    unit_window,
+    temporary_pointer_warp,
+)
+
+
+def bounded_wait(name: str, default: float) -> float:
+    value = float(os.environ.get(name, str(default)))
+    if value < 0 or value > 30:
+        raise ScriptError(f"{name} fora do intervalo seguro 0..30")
+    return value
+
+
+def join_window_size(title: str) -> tuple[int, int]:
+    window = unit_window(title)
+    size = window.get("layout", {}).get("window_size")
+    if (
+        not isinstance(size, list)
+        or len(size) != 2
+        or not all(isinstance(value, int) for value in size)
+    ):
+        raise ScriptError(f"não foi possível obter o tamanho da janela {title}")
+    return size[0], size[1]
+
+
+def validate_pre_grid_size(title: str) -> tuple[int, int]:
+    expected_width = int(os.environ.get("SETUP_INSTANCES_JOIN_WIDTH", "240"))
+    expected_height = int(os.environ.get("SETUP_INSTANCES_JOIN_HEIGHT", "240"))
+    tolerance = int(os.environ.get("SETUP_INSTANCES_JOIN_SIZE_TOLERANCE", "12"))
+    if not 0 <= tolerance <= 50:
+        raise ScriptError("SETUP_INSTANCES_JOIN_SIZE_TOLERANCE fora do intervalo seguro 0..50")
+    width, height = join_window_size(title)
+    if (
+        abs(width - expected_width) > tolerance
+        or abs(height - expected_height) > tolerance
+    ):
+        raise ScriptError(
+            f"janela está {width}x{height}, mas o join foi calibrado para "
+            f"{expected_width}x{expected_height} (±{tolerance}); execute-o antes do arrange-grid"
+        )
+    return width, height
+
+
+def join(title: str, dry_run: bool) -> None:
+    # Offsets are relative to the configured pre-tile surface center.
+    menu_y = int(os.environ.get("SETUP_INSTANCES_MENU_OFFSET_Y", "22"))
+    item_y = int(os.environ.get("SETUP_INSTANCES_ITEM_OFFSET_Y", "-94"))
+    menu_wait = bounded_wait("SETUP_INSTANCES_WAIT_MENU", 1.5)
+    if dry_run:
+        print(
+            f"DRY-RUN {title}: menu Y={menu_y} → espera {menu_wait}s "
+            f"→ item Y={item_y}"
+        )
+        return
+
+    width, height = validate_pre_grid_size(title)
+    print(f"{title}: tamanho pré-grid confirmado ({width}x{height})")
+    print(f"{title}: abrindo menu")
+    unit_left_click(title, offset_y=menu_y)
+    time.sleep(menu_wait)
+    print(f"{title}: selecionando item")
+    # The pointer is currently at center + menu_y. Move by the
+    # difference to reach center + item_y, without refocusing/scrolling.
+    unit_double_click(title, offset_y=item_y - menu_y, recenter=False)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="As janelas devem estar na tela inicial.")
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--title", choices=TITLES)
+    target.add_argument("--all", action="store_true")
+    target.add_argument(
+        "--batch",
+        nargs="+",
+        choices=TITLES,
+        metavar="TÍTULO",
+        help="processar somente as contas informadas",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    if args.all:
+        titles = list(TITLES)
+    elif args.batch:
+        titles = list(dict.fromkeys(args.batch))
+    else:
+        titles = [args.title]
+    results: dict[str, str] = {}
+    between = bounded_wait("SETUP_INSTANCES_WAIT_BETWEEN_JOINS", 0.8)
+
+    # Com --all, valide todas antes do primeiro clique. Uma janela já
+    # organizada no grid cancela toda a rodada em vez de produzir um join
+    # parcial com coordenadas incompatíveis.
+    if len(titles) > 1 and not args.dry_run:
+        preflight_errors: dict[str, str] = {}
+        for title in titles:
+            try:
+                validate_pre_grid_size(title)
+            except (ScriptError, ValueError) as exc:
+                preflight_errors[title] = str(exc)
+        if preflight_errors:
+            print("ERRO: pré-validação cancelou o join; nenhum clique foi enviado.", file=sys.stderr)
+            for title, detail in preflight_errors.items():
+                print(f"ERRO {title}: {detail}", file=sys.stderr)
+            return 1
+
+    with temporary_pointer_warp(enabled=not args.dry_run):
+        for title in titles:
+            try:
+                join(title, args.dry_run)
+                results[title] = "OK"
+            except (ScriptError, ValueError) as exc:
+                results[title] = f"ERRO: {exc}"
+                print(f"ERRO {title}: {exc}", file=sys.stderr)
+            if len(titles) > 1 and not args.dry_run:
+                time.sleep(between)
+
+    print("\nResumo:")
+    for title in titles:
+        print(f"{results[title]:<6} {title}" if results[title] == "OK" else f"{title}: {results[title]}")
+    return 0 if all(value == "OK" for value in results.values()) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

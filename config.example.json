@@ -1,0 +1,20 @@
+{
+  "app_id": "com.example.Surface",
+  "anchor_app_id": "com.example.Console",
+  "workspace": "ops",
+  "legacy_workspace": "ops-old",
+  "warp_marker": "window_ops.py",
+  "unit_root": "/path/to/units",
+  "accounts_file": "/path/to/accounts.json",
+  "launch": ["example-launcher", "--unit", "{unit}", "--profile", "{profile}"],
+  "keys": {"inspect": 18, "resume": 1, "activate": 37, "mode": 25, "recall": 103},
+  "targets": [
+    {"title": "01-alpha", "group": "b", "unit": "unit-01", "profile": "profile-01", "final": "pointer"},
+    {"title": "02-beta", "group": "a", "unit": "unit-02", "profile": "profile-02", "final": "key-inspect"},
+    {"title": "03-alpha", "group": "b", "unit": "unit-03", "profile": "profile-03", "final": "pointer"},
+    {"title": "04-beta", "group": "a", "unit": "unit-04", "profile": "profile-04", "final": "key-inspect"},
+    {"title": "05-beta", "group": "a", "unit": "unit-05", "profile": "profile-05", "final": "key-inspect"},
+    {"title": "06-alpha", "group": "b", "unit": "unit-06", "profile": "profile-06", "final": "pointer"},
+    {"title": "07-beta", "group": "a", "unit": "unit-07", "profile": "profile-07", "final": "key-inspect"}
+  ]
+}

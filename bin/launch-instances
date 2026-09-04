@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Launch configured PolyMC instances and wait for their windows."""
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from window_ops import CONFIG, TARGETS, ScriptError, TITLES, target_windows  # noqa: E402
+
+
+INSTANCE_MAP = {title: item["unit"] for title, item in TARGETS.items()}
+PROFILE_MAP = {title: item["profile"] for title, item in TARGETS.items()}
+INSTANCE_ROOT = Path(CONFIG["unit_root"])
+ACCOUNTS_FILE = Path(CONFIG["accounts_file"])
+
+
+def instance_name(instance_id: str) -> str | None:
+    config = INSTANCE_ROOT / instance_id / "instance.cfg"
+    if not config.is_file():
+        return None
+    for line in config.read_text(errors="replace").splitlines():
+        if line.startswith("name="):
+            return line.removeprefix("name=")
+    return None
+
+
+def available_profiles() -> set[str]:
+    if not ACCOUNTS_FILE.is_file():
+        raise ScriptError(f"arquivo de contas não encontrado: {ACCOUNTS_FILE}")
+    import json
+
+    try:
+        data = json.loads(ACCOUNTS_FILE.read_text())
+        return {
+            account["profile"]["name"]
+            for account in data.get("accounts", [])
+            if isinstance(account.get("profile"), dict)
+            and isinstance(account["profile"].get("name"), str)
+        }
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ScriptError("não foi possível validar os perfis configurados") from exc
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", choices=TITLES, action="append", help="iniciar somente esta alt")
+    parser.add_argument("--delay", type=float, default=3.0, help="intervalo entre JVMs")
+    parser.add_argument("--timeout", type=float, default=240.0, help="espera máxima pelos títulos")
+    parser.add_argument(
+        "--min-ready",
+        type=int,
+        default=4,
+        help="mínimo para executar o grid quando --grid for usado",
+    )
+    layout = parser.add_mutually_exclusive_group()
+    layout.add_argument(
+        "--grid",
+        action="store_true",
+        help="executar arrange-grid ao final (desativado por padrão)",
+    )
+    # Compatibilidade com comandos antigos. O launcher agora já não cria o
+    # grid por padrão, então esta opção não precisa fazer nada.
+    layout.add_argument("--no-grid", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    if args.delay < 0 or args.timeout < 0 or not 1 <= args.min_ready <= len(TITLES):
+        parser.error("valores de delay/timeout/min-ready inválidos")
+
+    selected = list(dict.fromkeys(args.only or TITLES))
+    present = {window["title"] for window in target_windows()}
+    profiles = available_profiles()
+    launched: list[str] = []
+
+    for title in selected:
+        instance_id = INSTANCE_MAP[title]
+        profile = PROFILE_MAP[title]
+        instance_dir = INSTANCE_ROOT / instance_id
+        if not instance_dir.is_dir():
+            print(f"ERRO {title}: pasta ausente: {instance_dir}", file=sys.stderr)
+            continue
+        configured_name = instance_name(instance_id)
+        if configured_name != title:
+            print(
+                f"AVISO {title}: {instance_id}/instance.cfg contém name={configured_name!r}",
+                file=sys.stderr,
+            )
+        if profile not in profiles:
+            print(f"ERRO {title}: perfil configurado ausente: {profile!r}", file=sys.stderr)
+            continue
+        if title in present:
+            print(f"SKIP {title}: janela já está aberta")
+            continue
+
+        command = [
+            str(part).format(unit=instance_id, profile=profile, title=title)
+            for part in CONFIG["launch"]
+        ]
+        print("INICIAR " + title + ": " + " ".join(repr(part) for part in command))
+        if not args.dry_run:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            launched.append(title)
+            time.sleep(args.delay)
+
+    if args.dry_run:
+        return 0
+
+    wanted = set(selected)
+    last_seen: set[str] = set()
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        seen = {window["title"] for window in target_windows()} & wanted
+        if seen != last_seen:
+            print(f"Prontas ({len(seen)}/{len(wanted)}): " + ", ".join(sorted(seen)))
+            last_seen = seen
+        if seen == wanted:
+            break
+        time.sleep(2.0)
+
+    missing = wanted - last_seen
+    for title in sorted(missing):
+        print(f"ERRO {title}: título não apareceu antes do timeout", file=sys.stderr)
+
+    if args.grid and len(last_seen) >= min(args.min_ready, len(wanted)):
+        print("Executando arrange-grid (nenhuma sequência de input será iniciada)...")
+        result = subprocess.run([str(Path(__file__).with_name("arrange-grid"))])
+        if result.returncode != 0:
+            print("ERRO: arrange-grid falhou", file=sys.stderr)
+            return 1
+    elif args.grid:
+        print("Grid não executado: quantidade mínima de janelas não atingida", file=sys.stderr)
+    elif last_seen:
+        print(
+            "Janelas mantidas no layout inicial. Execute join-server antes de arrange-grid."
+        )
+
+    return 1 if missing else 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ScriptError, OSError) as exc:
+        print(f"ERRO: {exc}", file=sys.stderr)
+        raise SystemExit(1)

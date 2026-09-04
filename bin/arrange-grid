@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Arrange configured targets into two ordered columns."""
+
+from collections import defaultdict
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from window_ops import (  # noqa: E402
+    GRID_ORDER,
+    GROUP_A,
+    ScriptError,
+    GROUP_B,
+    TITLES,
+    CONFIG,
+    target_windows,
+    all_windows,
+    focused_action,
+    unit_window,
+    unit_window_id,
+    niri_action,
+    niri_json,
+    snapshot,
+)
+
+
+WORKSPACE = str(CONFIG["workspace"])
+LEGACY_WORKSPACE = str(CONFIG.get("legacy_workspace", ""))
+
+
+def position(title: str) -> tuple[int, int]:
+    pos = unit_window(title).get("layout", {}).get("pos_in_scrolling_layout")
+    if not isinstance(pos, list) or len(pos) != 2:
+        raise ScriptError(f"{title}: posição tiled indisponível")
+    return int(pos[0]), int(pos[1])
+
+
+def ensure_workspace() -> None:
+    workspaces = niri_json("workspaces")
+    existing = next((ws for ws in workspaces if ws.get("name") == WORKSPACE), None)
+    if not existing:
+        raise ScriptError(f"workspace existente {WORKSPACE!r} não encontrado")
+
+
+def cleanup_legacy_workspace() -> None:
+    workspaces = niri_json("workspaces")
+    legacy = next((ws for ws in workspaces if ws.get("name") == LEGACY_WORKSPACE), None)
+    if not legacy:
+        return
+    if any(window.get("workspace_id") == legacy["id"] for window in all_windows()):
+        return
+    niri_action("unset-workspace-name", LEGACY_WORKSPACE)
+
+
+def move_targets_to_workspace(titles: list[str]) -> None:
+    for title in titles:
+        window_id = unit_window_id(title)
+        niri_action("move-window-to-tiling", "--id", window_id)
+        niri_action(
+            "move-window-to-workspace",
+            "--window-id",
+            window_id,
+            "--focus",
+            "false",
+            WORKSPACE,
+        )
+        time.sleep(0.05)
+
+    workspace = next(ws for ws in niri_json("workspaces") if ws.get("name") == WORKSPACE)
+    for title in titles:
+        if unit_window(title).get("workspace_id") != workspace["id"]:
+            raise ScriptError(f"{title}: movimento para {WORKSPACE} não confirmado")
+
+
+def split_existing_columns(titles: list[str]) -> None:
+    """Make every target its own column before deterministic reassembly."""
+    workspace = next(ws for ws in niri_json("workspaces") if ws.get("name") == WORKSPACE)
+    for _ in range(30):
+        occupants: dict[int, list[dict]] = defaultdict(list)
+        target_columns: dict[str, int] = {}
+        for window in all_windows():
+            if window.get("workspace_id") != workspace["id"]:
+                continue
+            pos = window.get("layout", {}).get("pos_in_scrolling_layout")
+            if isinstance(pos, list) and len(pos) == 2:
+                occupants[int(pos[0])].append(window)
+        for title in titles:
+            target_columns[title] = position(title)[0]
+        stacked = [title for title, col in target_columns.items() if len(occupants[col]) > 1]
+        if not stacked:
+            return
+        title = stacked[0]
+        niri_action("consume-or-expel-window-right", "--id", unit_window_id(title))
+        time.sleep(0.08)
+    raise ScriptError("não foi possível separar as colunas existentes")
+
+
+def order_columns(titles: list[str]) -> None:
+    desired = [title for title in GRID_ORDER if title in titles]
+    # Moving only target columns preserves unrelated surfaces.
+    for title in desired:
+        focused_action(title, "move-column-to-last")
+        time.sleep(0.05)
+
+
+def build_column(group: tuple[str, ...], available: set[str]) -> None:
+    members = [title for title in group if title in available]
+    if not members:
+        return
+    anchor = members[0]
+    for title in members[1:]:
+        anchor_col, _ = position(anchor)
+        child_col, _ = position(title)
+        if child_col != anchor_col + 1:
+            focused_action(title, "move-column-to-index", anchor_col + 1)
+            time.sleep(0.05)
+        niri_action("consume-or-expel-window-left", "--id", unit_window_id(title))
+        time.sleep(0.08)
+        if position(title)[0] != position(anchor)[0]:
+            raise ScriptError(f"{title}: agrupamento com {anchor} não confirmado")
+
+    # Put members in the requested top-to-bottom order.
+    for expected_row, title in enumerate(members, start=1):
+        for _ in range(len(members) + 1):
+            _, row = position(title)
+            if row == expected_row:
+                break
+            if row < expected_row:
+                raise ScriptError(f"{title}: ordem vertical inesperada")
+            focused_action(title, "move-window-up")
+            time.sleep(0.05)
+        else:
+            raise ScriptError(f"{title}: não foi possível ajustar a ordem vertical")
+
+
+def set_sizes(titles: list[str]) -> None:
+    for title in titles:
+        window_id = unit_window_id(title)
+        niri_action("set-window-width", "240", "--id", window_id)
+        niri_action("set-window-height", "240", "--id", window_id)
+        time.sleep(0.03)
+
+
+def main() -> int:
+    before = snapshot("grid-before")
+    print(f"Estado anterior salvo em {before}")
+
+    present = {window["title"] for window in target_windows()}
+    titles = [title for title in GRID_ORDER if title in present]
+    if not titles:
+        raise ScriptError("nenhum alvo configurado foi encontrado; nenhuma ação aplicada")
+    print("Detectadas: " + ", ".join(titles))
+
+    ensure_workspace()
+    move_targets_to_workspace(titles)
+    cleanup_legacy_workspace()
+    split_existing_columns(titles)
+    order_columns(titles)
+    build_column(GROUP_A, set(titles))
+    build_column(GROUP_B, set(titles))
+    set_sizes(titles)
+
+    focused_action(titles[0], "center-visible-columns")
+    after = snapshot("grid-after")
+    print(f"Grid concluído; estado final salvo em {after}")
+    for title in titles:
+        col, row = position(title)
+        print(f"OK {title}: coluna={col}, linha={row}, id_atual={unit_window_id(title)}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ScriptError as exc:
+        print(f"ERRO: {exc}", file=sys.stderr)
+        raise SystemExit(1)

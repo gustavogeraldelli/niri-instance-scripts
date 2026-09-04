@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Small title-based window control CLI for Niri."""
+
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+from window_ops import (  # noqa: E402
+    ScriptError,
+    TITLES,
+    target_windows,
+    unit_focus,
+    unit_key,
+    unit_left_click,
+    unit_pointer_center,
+    unit_right_click,
+    unit_window_id,
+    temporary_pointer_warp,
+)
+
+
+def usage() -> None:
+    print(
+        "uso: window-action list | id TÍTULO | focus TÍTULO | "
+        "key TÍTULO KEYCODE | pointer-center TÍTULO | "
+        "left-click TÍTULO | right-click TÍTULO",
+        file=sys.stderr,
+    )
+
+
+def main() -> int:
+    if len(sys.argv) == 2 and sys.argv[1] == "list":
+        found = {window["title"]: window for window in target_windows()}
+        for title in TITLES:
+            window = found.get(title)
+            if window:
+                marker = "FOCO" if window.get("is_focused") else "presente"
+                print(f"{title}: {marker}, id={window['id']}, workspace={window['workspace_id']}")
+            else:
+                print(f"{title}: ausente")
+        return 0
+
+    if len(sys.argv) < 3:
+        usage()
+        return 2
+    command, title = sys.argv[1:3]
+    if command == "id" and len(sys.argv) == 3:
+        print(unit_window_id(title))
+    elif command == "focus" and len(sys.argv) == 3:
+        print(unit_focus(title))
+    elif command == "key" and len(sys.argv) == 4:
+        unit_key(title, int(sys.argv[3]))
+    elif command == "pointer-center" and len(sys.argv) == 3:
+        with temporary_pointer_warp():
+            unit_pointer_center(title)
+        print("OK")
+    elif command == "left-click" and len(sys.argv) == 3:
+        with temporary_pointer_warp():
+            unit_left_click(title)
+    elif command == "right-click" and len(sys.argv) == 3:
+        with temporary_pointer_warp():
+            unit_right_click(title)
+    else:
+        usage()
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (ScriptError, ValueError) as exc:
+        print(f"ERRO: {exc}", file=sys.stderr)
+        raise SystemExit(1)
