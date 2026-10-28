@@ -16,7 +16,6 @@ from window_ops import (  # noqa: E402
     unit_pointer_center,
     unit_right_click,
     unit_window_id,
-    temporary_pointer_warp,
 )
 
 
@@ -52,15 +51,12 @@ def main() -> int:
     elif command == "key" and len(sys.argv) == 4:
         unit_key(title, int(sys.argv[3]))
     elif command == "pointer-center" and len(sys.argv) == 3:
-        with temporary_pointer_warp():
-            unit_pointer_center(title)
+        unit_pointer_center(title)
         print("OK")
     elif command == "left-click" and len(sys.argv) == 3:
-        with temporary_pointer_warp():
-            unit_left_click(title)
+        unit_left_click(title)
     elif command == "right-click" and len(sys.argv) == 3:
-        with temporary_pointer_warp():
-            unit_right_click(title)
+        unit_right_click(title)
     else:
         usage()
         return 2

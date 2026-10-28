@@ -23,7 +23,6 @@ from window_ops import (  # noqa: E402
     unit_window_id,
     focused_window,
     unit_focus,
-    temporary_pointer_warp,
     target_action,
 )
 
@@ -67,13 +66,12 @@ def sequence(title: str, dry_run: bool, from_selector: bool = False) -> None:
         pause("SETUP_INSTANCES_WAIT_RECALL", 5.0)
 
     print(f"{title}: abrindo seletor")
-    # The window was already focused by the key helpers, so its pointer was
-    # warped to the center. Do not bounce through the anchor between clicks.
+    # Keep the pointer in place for the context-menu action.
     unit_right_click(title, recenter=False)
     pause("SETUP_INSTANCES_WAIT_GUI", 0.8)
 
     print(f"{title}: selecionando item")
-    unit_left_click(title, offset_y=panel_offset_y, recenter=False)
+    unit_left_click(title, offset_y=panel_offset_y)
     pause("SETUP_INSTANCES_WAIT_STAGE", 3.0)
 
     print(f"{title}: enviando P")
@@ -111,6 +109,10 @@ def pipeline(
         if value < 0 or value > 10:
             raise ScriptError(f"{name} fora do intervalo seguro 0..10")
     results: dict[str, str] = {}
+    stage_wait = float(os.environ.get("SETUP_INSTANCES_WAIT_STAGE", "3"))
+    key_wait = float(os.environ.get("SETUP_INSTANCES_WAIT_KEY", "3"))
+    if not (0 <= stage_wait <= 30 and 0 <= key_wait <= 30):
+        raise ScriptError("esperas de etapa fora do intervalo 0..30")
 
     if dry_run:
         print("DRY-RUN PIPELINE: " + ", ".join(titles))
@@ -124,10 +126,17 @@ def pipeline(
         print(
             f"  2. Em cada alvo: abrir seletor + item Y={panel_offset_y}px"
         )
-        print("     Depois, seguir sem espera global")
-        print(f"  3. Mode por {p_key_ms}ms; seguir sem espera global")
+        print(f"     Espera mínima por alvo antes de mode: {stage_wait}s")
+        print(f"  3. Mode por {p_key_ms}ms; espera mínima por alvo: {key_wait}s")
         print("  4. Ação final configurada por alvo")
         return {title: "OK" for title in titles}
+
+    entered, changed = {}, {}
+
+    def wait_since(start, delay):
+        remaining = start + delay - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
 
     active: list[str] = []
     for title in titles:
@@ -172,16 +181,21 @@ def pipeline(
     def open_selector(title: str) -> None:
         # Keep both actions together: this GUI can disappear when focus leaves.
         unit_right_click(title, recenter=False)
-        unit_left_click(title, offset_y=panel_offset_y, recenter=False)
+        pause("SETUP_INSTANCES_WAIT_GUI", 0.8)
+        unit_left_click(title, offset_y=panel_offset_y)
+        entered[title] = time.monotonic()
 
     phase("abrir seletor e escolher item", open_selector)
 
-    phase(
-        "enviar P",
-        lambda title: unit_key(title, KEY_P, key_delay_ms=p_key_ms),
-    )
+    def mode_action(title: str) -> None:
+        wait_since(entered[title], stage_wait)
+        unit_key(title, KEY_P, key_delay_ms=p_key_ms)
+        changed[title] = time.monotonic()
+
+    phase("enviar mode", mode_action)
 
     def final_action(title: str) -> None:
+        wait_since(changed[title], key_wait)
         if target_action(title) == "pointer":
             unit_right_click(title, recenter=False)
         else:
@@ -200,8 +214,8 @@ def main() -> int:
         description="Os alvos devem estar prontos para a sequência de entrada configurada."
     )
     target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--title", choices=TITLES, help="testar/processar uma única conta")
-    target.add_argument("--all", action="store_true", help="processar as sete em pipeline")
+    target.add_argument("--title", choices=TITLES, help="testar/processar um único alvo")
+    target.add_argument("--all", action="store_true", help="processar todos em pipeline")
     target.add_argument(
         "--batch",
         nargs="+",
@@ -217,19 +231,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    with temporary_pointer_warp(enabled=not args.dry_run):
-        if args.title:
-            titles = [args.title]
-            results: dict[str, str] = {}
-            try:
-                sequence(args.title, args.dry_run, args.from_selector)
-                results[args.title] = "OK"
-            except (ScriptError, ValueError) as exc:
-                results[args.title] = f"ERRO: {exc}"
-                print(f"ERRO {args.title}: {exc}", file=sys.stderr)
-        else:
-            titles = list(dict.fromkeys(list(TITLES) if args.all else args.batch))
-            results = pipeline(titles, args.dry_run, args.from_selector)
+    if args.title:
+        titles = [args.title]
+        results: dict[str, str] = {}
+        try:
+            sequence(args.title, args.dry_run, args.from_selector)
+            results[args.title] = "OK"
+        except (ScriptError, ValueError) as exc:
+            results[args.title] = f"ERRO: {exc}"
+            print(f"ERRO {args.title}: {exc}", file=sys.stderr)
+    else:
+        titles = list(dict.fromkeys(list(TITLES) if args.all else args.batch))
+        results = pipeline(titles, args.dry_run, args.from_selector)
 
     print("\nResumo:")
     for title in titles:

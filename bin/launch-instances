@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Launch configured PolyMC instances and wait for their windows."""
+"""Launch configured instances and wait for their windows."""
 
 import argparse
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -15,46 +14,18 @@ from window_ops import CONFIG, TARGETS, ScriptError, TITLES, target_windows  # n
 
 INSTANCE_MAP = {title: item["unit"] for title, item in TARGETS.items()}
 PROFILE_MAP = {title: item["profile"] for title, item in TARGETS.items()}
-INSTANCE_ROOT = Path(CONFIG["unit_root"])
-ACCOUNTS_FILE = Path(CONFIG["accounts_file"])
-
-
-def instance_name(instance_id: str) -> str | None:
-    config = INSTANCE_ROOT / instance_id / "instance.cfg"
-    if not config.is_file():
-        return None
-    for line in config.read_text(errors="replace").splitlines():
-        if line.startswith("name="):
-            return line.removeprefix("name=")
-    return None
-
-
-def available_profiles() -> set[str]:
-    if not ACCOUNTS_FILE.is_file():
-        raise ScriptError(f"arquivo de contas não encontrado: {ACCOUNTS_FILE}")
-    import json
-
-    try:
-        data = json.loads(ACCOUNTS_FILE.read_text())
-        return {
-            account["profile"]["name"]
-            for account in data.get("accounts", [])
-            if isinstance(account.get("profile"), dict)
-            and isinstance(account["profile"].get("name"), str)
-        }
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ScriptError("não foi possível validar os perfis configurados") from exc
+INSTANCE_ROOT = Path(CONFIG["unit_root"]).expanduser()
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--only", choices=TITLES, action="append", help="iniciar somente esta alt")
-    parser.add_argument("--delay", type=float, default=3.0, help="intervalo entre JVMs")
+    parser.add_argument("--only", choices=TITLES, action="append", help="iniciar somente este alvo")
+    parser.add_argument("--delay", type=float, default=3.0, help="intervalo entre processos")
     parser.add_argument("--timeout", type=float, default=240.0, help="espera máxima pelos títulos")
     parser.add_argument(
         "--min-ready",
         type=int,
-        default=4,
+        default=len(TITLES),
         help="mínimo para executar o grid quando --grid for usado",
     )
     layout = parser.add_mutually_exclusive_group()
@@ -72,25 +43,16 @@ def main() -> int:
         parser.error("valores de delay/timeout/min-ready inválidos")
 
     selected = list(dict.fromkeys(args.only or TITLES))
-    present = {window["title"] for window in target_windows()}
-    profiles = available_profiles()
-    launched: list[str] = []
+    present = set() if args.dry_run else {window["title"] for window in target_windows()}
 
+    failed = False
     for title in selected:
         instance_id = INSTANCE_MAP[title]
         profile = PROFILE_MAP[title]
         instance_dir = INSTANCE_ROOT / instance_id
         if not instance_dir.is_dir():
             print(f"ERRO {title}: pasta ausente: {instance_dir}", file=sys.stderr)
-            continue
-        configured_name = instance_name(instance_id)
-        if configured_name != title:
-            print(
-                f"AVISO {title}: {instance_id}/instance.cfg contém name={configured_name!r}",
-                file=sys.stderr,
-            )
-        if profile not in profiles:
-            print(f"ERRO {title}: perfil configurado ausente: {profile!r}", file=sys.stderr)
+            failed = True
             continue
         if title in present:
             print(f"SKIP {title}: janela já está aberta")
@@ -109,11 +71,10 @@ def main() -> int:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            launched.append(title)
             time.sleep(args.delay)
 
     if args.dry_run:
-        return 0
+        return int(failed)
 
     wanted = set(selected)
     last_seen: set[str] = set()

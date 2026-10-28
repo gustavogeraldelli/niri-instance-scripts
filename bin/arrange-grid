@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Arrange configured targets into two ordered columns."""
+"""Arrange configured targets into ordered columns."""
 
 from collections import defaultdict
 from pathlib import Path
@@ -10,9 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 from window_ops import (  # noqa: E402
     GRID_ORDER,
-    GROUP_A,
+    GRID_COLUMNS,
     ScriptError,
-    GROUP_B,
     TITLES,
     CONFIG,
     target_windows,
@@ -138,8 +137,8 @@ def build_column(group: tuple[str, ...], available: set[str]) -> None:
 def set_sizes(titles: list[str]) -> None:
     for title in titles:
         window_id = unit_window_id(title)
-        niri_action("set-window-width", "240", "--id", window_id)
-        niri_action("set-window-height", "240", "--id", window_id)
+        niri_action("reset-window-height", "--id", window_id)
+        niri_action("set-window-width", str(CONFIG.get("width", 240)), "--id", window_id)
         time.sleep(0.03)
 
 
@@ -158,11 +157,24 @@ def main() -> int:
     cleanup_legacy_workspace()
     split_existing_columns(titles)
     order_columns(titles)
-    build_column(GROUP_A, set(titles))
-    build_column(GROUP_B, set(titles))
+    for column in GRID_COLUMNS:
+        build_column(column, set(titles))
     set_sizes(titles)
 
     focused_action(titles[0], "center-visible-columns")
+    # Check the final grouping and row order after resizing.
+    last_column = 0
+    for group in GRID_COLUMNS:
+        members = [title for title in group if title in titles]
+        if not members:
+            continue
+        column = position(members[0])[0]
+        if column <= last_column:
+            raise ScriptError("ordem final das colunas inesperada")
+        for row, title in enumerate(members, 1):
+            if position(title) != (column, row):
+                raise ScriptError(f"{title}: layout final não corresponde à configuração")
+        last_column = column
     after = snapshot("grid-after")
     print(f"Grid concluído; estado final salvo em {after}")
     for title in titles:

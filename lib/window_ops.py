@@ -7,9 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import sys
 import time
-from contextlib import contextmanager
 from typing import Any, Iterable
 
 
@@ -26,12 +24,12 @@ except (OSError, ValueError) as exc:
 
 TARGETS = {item["title"]: item for item in CONFIG["targets"]}
 TITLES = tuple(TARGETS)
-GROUP_A = tuple(title for title in TITLES if TARGETS[title]["group"] == "a")
-GROUP_B = tuple(title for title in TITLES if TARGETS[title]["group"] == "b")
-GRID_ORDER = GROUP_A + GROUP_B
+GRID_COLUMNS = CONFIG["columns"]
+GRID_ORDER = tuple(title for column in GRID_COLUMNS for title in column)
+if len(TARGETS) != len(CONFIG["targets"]) or len(GRID_ORDER) != len(TITLES) or set(GRID_ORDER) != set(TITLES):
+    raise ValueError("targets and columns must contain each title exactly once")
 TITLE_RE = re.compile(r"^(?:" + "|".join(re.escape(title) for title in TITLES) + r")$")
 APP_ID = CONFIG["app_id"]
-ANCHOR_APP_ID = CONFIG["anchor_app_id"]
 
 KEY_E = int(CONFIG["keys"]["inspect"])
 KEY_ESC = int(CONFIG["keys"]["resume"])
@@ -47,44 +45,6 @@ def target_action(title: str) -> str:
 
 class ScriptError(RuntimeError):
     pass
-
-
-@contextmanager
-def temporary_pointer_warp(enabled: bool = True):
-    """Enable niri pointer warp only while an automation command is running."""
-    if not enabled:
-        yield
-        return
-
-    input_config = Path.home() / ".config/niri/cfg/input.kdl"
-    marker = str(CONFIG.get("warp_marker", "window_ops.py"))
-    disabled = f"    // warp-mouse-to-focus // managed temporarily by {marker}"
-    active = f"    warp-mouse-to-focus // managed temporarily by {marker}"
-    try:
-        content = input_config.read_text()
-    except OSError as exc:
-        raise ScriptError(f"não foi possível ler {input_config}") from exc
-    if disabled not in content and active not in content:
-        raise ScriptError("marcador gerenciado de warp-mouse-to-focus não encontrado")
-
-    try:
-        if disabled in content:
-            input_config.write_text(content.replace(disabled, active, 1))
-            niri_action("load-config-file")
-            time.sleep(0.20)
-        yield
-    finally:
-        try:
-            current = input_config.read_text()
-            if active in current:
-                input_config.write_text(current.replace(active, disabled, 1))
-                niri_action("load-config-file")
-                time.sleep(0.10)
-        except (OSError, ScriptError) as exc:
-            print(
-                f"AVISO: não foi possível desativar warp-mouse-to-focus: {exc}",
-                file=sys.stderr,
-            )
 
 
 def _run(args: list[str], *, json_output: bool = False) -> Any:
@@ -266,99 +226,50 @@ def unit_key(title: str, keycode: int, key_delay_ms: int | None = None) -> None:
     _ydotool(args)
 
 
-def _window_output(window: dict[str, Any]) -> dict[str, Any]:
-    workspace_id = window.get("workspace_id")
-    workspaces = niri_json("workspaces")
-    workspace = next((item for item in workspaces if item.get("id") == workspace_id), None)
-    if not workspace or not workspace.get("output"):
-        raise ScriptError("não foi possível determinar o monitor da janela")
-    outputs = niri_json("outputs")
-    output = outputs.get(workspace["output"])
-    if not output or not isinstance(output.get("logical"), dict):
-        raise ScriptError("geometria lógica do monitor não disponível")
-    return output
-
-
 def unit_pointer_center(title: str) -> None:
-    input_config = Path.home() / ".config/niri/cfg/input.kdl"
-    if not input_config.is_file() or not re.search(
-        r"^\s*warp-mouse-to-focus(?:\s*//.*)?$", input_config.read_text(), re.MULTILINE
-    ):
-        raise ScriptError("warp-mouse-to-focus não está habilitado; clique recusado")
-    window_id = unit_window_id(title)
-    current = focused_window()
-    if current and current.get("id") == window_id:
-        # Niri only warps when focus actually changes. Bounce through the
-        # configured anchor on the same workspace when recentering is needed.
-        target_workspace = unit_window(title).get("workspace_id")
-        bounce = next(
-            (
-                window
-                for window in all_windows()
-                if window.get("workspace_id") == target_workspace
-                and window.get("app_id") == ANCHOR_APP_ID
-            ),
-            None,
-        )
-        if not bounce:
-            raise ScriptError("âncora segura não encontrada para renovar o warp")
-        niri_action("focus-window", "--id", bounce["id"])
-        time.sleep(0.05)
-    # Niri does not warp when the old pointer position is already inside the
-    # newly focused window. The previous server-list click leaves it high in
-    # the window, which made alternating menu clicks use the wrong relative
-    # origin. Put it outside the target first so the focus
-    # transition always produces a real center warp.
-    _ydotool(["mousemove", "--absolute", "0", "0"])
-    time.sleep(0.05)
-    window_id = unit_focus(title)
-    # With warp-mouse-to-focus enabled, niri owns the placement and warps to
-    # the center of this exact, freshly focused surface.
-    # Give niri's scrolling animation and pointer warp time to settle before
-    # ydotool applies a relative movement.
-    pointer_wait = float(os.environ.get("SETUP_INSTANCES_WAIT_POINTER_WARP", "0.30"))
-    if not 0 <= pointer_wait <= 2:
-        raise ScriptError("SETUP_INSTANCES_WAIT_POINTER_WARP fora do intervalo seguro 0..2")
-    time.sleep(pointer_wait)
-    assert_focused(title, window_id)
+    unit_click(title, click=False)
 
 
 def unit_click(
     title: str,
-    button: str,
+    button: str = "left",
     offset_x: int = 0,
     offset_y: int = 0,
     repeat: int = 1,
     recenter: bool = True,
+    *,
+    click: bool = True,
 ) -> None:
-    button_codes = {"left": "0xC0", "right": "0xC1"}
-    if button not in button_codes:
-        raise ScriptError(f"botão inválido: {button!r}")
-    if abs(offset_x) > 500 or abs(offset_y) > 500:
-        raise ScriptError("deslocamento de mouse fora do intervalo seguro -500..500")
-    if not 1 <= repeat <= 3:
-        raise ScriptError("repetição de clique fora do intervalo seguro 1..3")
-    # Center first, rather than focusing and then centering. Otherwise every
-    # click makes unit_pointer_center think the target was already focused and
-    # bounce through the anchor, causing an unnecessary scrolling animation.
-    if recenter:
-        unit_pointer_center(title)
+    from x11_pointer import X11Pointer, aim
+
+    if button not in {"left", "right"} or not 1 <= repeat <= 3:
+        raise ScriptError("botão ou repetição inválidos")
     window_id = unit_focus(title)
-    assert_focused(title, window_id)
-    if offset_x or offset_y:
-        # `--` is required when an offset is negative; otherwise ydotool's
-        # option parser interprets values such as -20 as command-line flags.
-        _ydotool(["mousemove", "--", str(offset_x), str(offset_y)])
-        pointer_wait = float(os.environ.get("SETUP_INSTANCES_WAIT_POINTER_MOVE", "0.18"))
-        if not 0 <= pointer_wait <= 2:
-            raise ScriptError("SETUP_INSTANCES_WAIT_POINTER_MOVE fora do intervalo seguro 0..2")
-        time.sleep(pointer_wait)
-        assert_focused(title, window_id)
-    args = ["click"]
-    if repeat > 1:
-        args.extend(["--repeat", str(repeat), "--next-delay", "100"])
-    args.append(button_codes[button])
-    _ydotool(args)
+    settle = float(os.environ.get("SETUP_INSTANCES_WAIT_POINTER_WARP", "0.30"))
+    if not 0 <= settle <= 2:
+        raise ScriptError("espera do ponteiro fora do intervalo 0..2")
+    time.sleep(settle)
+    try:
+        with X11Pointer(title) as pointer:
+            if recenter or offset_x or offset_y:
+                if recenter:
+                    x, y = pointer.width // 2, pointer.height // 2
+                else:
+                    x, y = pointer.position()
+                aim(pointer, (x + offset_x, y + offset_y),
+                    lambda dx, dy: _ydotool(["mousemove", "--", str(dx), str(dy)]),
+                    time.sleep, lambda: assert_focused(title, window_id))
+            x, y = pointer.position()
+            if not (0 <= x < pointer.width and 0 <= y < pointer.height):
+                raise ScriptError("cursor fora da janela; clique cancelado")
+            assert_focused(title, window_id)
+            if click:
+                args = ["click"]
+                if repeat > 1:
+                    args.extend(["--repeat", str(repeat), "--next-delay", "100"])
+                _ydotool(args + [{"left": "0xC0", "right": "0xC1"}[button]])
+    except (RuntimeError, OSError) as exc:
+        raise ScriptError(str(exc)) from exc
 
 
 def unit_left_click(

@@ -15,7 +15,6 @@ from window_ops import (  # noqa: E402
     unit_double_click,
     unit_left_click,
     unit_window,
-    temporary_pointer_warp,
 )
 
 
@@ -74,9 +73,7 @@ def join(title: str, dry_run: bool) -> None:
     unit_left_click(title, offset_y=menu_y)
     time.sleep(menu_wait)
     print(f"{title}: selecionando item")
-    # The pointer is currently at center + menu_y. Move by the
-    # difference to reach center + item_y, without refocusing/scrolling.
-    unit_double_click(title, offset_y=item_y - menu_y, recenter=False)
+    unit_double_click(title, offset_y=item_y)
 
 
 def main() -> int:
@@ -89,7 +86,7 @@ def main() -> int:
         nargs="+",
         choices=TITLES,
         metavar="TÍTULO",
-        help="processar somente as contas informadas",
+        help="processar somente os alvos informados",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -119,16 +116,15 @@ def main() -> int:
                 print(f"ERRO {title}: {detail}", file=sys.stderr)
             return 1
 
-    with temporary_pointer_warp(enabled=not args.dry_run):
-        for title in titles:
-            try:
-                join(title, args.dry_run)
-                results[title] = "OK"
-            except (ScriptError, ValueError) as exc:
-                results[title] = f"ERRO: {exc}"
-                print(f"ERRO {title}: {exc}", file=sys.stderr)
-            if len(titles) > 1 and not args.dry_run:
-                time.sleep(between)
+    for title in titles:
+        try:
+            join(title, args.dry_run)
+            results[title] = "OK"
+        except (ScriptError, ValueError) as exc:
+            results[title] = f"ERRO: {exc}"
+            print(f"ERRO {title}: {exc}", file=sys.stderr)
+        if len(titles) > 1 and not args.dry_run:
+            time.sleep(between)
 
     print("\nResumo:")
     for title in titles:

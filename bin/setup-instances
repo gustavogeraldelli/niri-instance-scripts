@@ -31,7 +31,7 @@ def main() -> int:
         "--main-menu-wait",
         type=float,
         default=float(os.environ.get("SETUP_INSTANCES_WAIT_MAIN_MENU", "6")),
-        help="espera após as sete janelas aparecerem (padrão: 6s)",
+        help="espera após todas as janelas aparecerem (padrão: 6s)",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -39,7 +39,7 @@ def main() -> int:
         parser.error("--main-menu-wait deve estar no intervalo 0..60")
 
     commands = [
-        ("abrir as sete instâncias", [str(BIN_DIR / "launch-instances")]),
+        ("abrir as instâncias", [str(BIN_DIR / "launch-instances")]),
         ("selecionar servidor", [str(BIN_DIR / "join-server"), "--all"]),
         ("executar setup", [str(BIN_DIR / "configure-instances"), "--all"]),
         ("organizar grid final", [str(BIN_DIR / "arrange-grid")]),
@@ -67,7 +67,7 @@ def main() -> int:
     for stage in commands[1:]:
         run_stage(*stage)
 
-    print("\nOK: sete contas configuradas e grid aplicado.")
+    print("\nOK: instâncias configuradas e grid aplicado.")
     return 0
 
 
